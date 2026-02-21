@@ -7,6 +7,8 @@ import datetime
 # API 端点
 API_BASE = "https://api.steampowered.com"
 OPENDOTA_API_BASE = "https://api.opendota.com/api"
+# Valve CDN for images (avoids OpenDota rate limits)
+VALVE_CDN_BASE = "https://cdn.cloudflare.steamstatic.com"
 
 class Dota2Monitor:
     def __init__(self, api_key, steam_id=None):
@@ -57,38 +59,184 @@ class Dota2Monitor:
                 return {}
 
     async def load_heroes(self):
-        """从 OpenDota 获取英雄数据并建立映射"""
+        """从 OpenDota 和 Steam API 获取英雄数据并建立映射"""
         if self.heroes_map:
             return
             
+        temp_heroes = {} # id -> {img, name}
+        
         async with aiohttp.ClientSession() as session:
+            # 1. 获取 OpenDota 英雄数据 (用于图片)
             try:
                 async with session.get(f"{OPENDOTA_API_BASE}/heroes") as resp:
                     if resp.status == 200:
                         heroes = await resp.json()
-                        self.heroes_map = {h['id']: h['localized_name'] for h in heroes}
+                        for h in heroes:
+                            temp_heroes[h['id']] = {
+                                'name': h['localized_name'], # 默认英文名
+                                'img': f"{VALVE_CDN_BASE}{h['img']}"
+                            }
             except Exception as e:
                 pass
 
+            # 2. 获取 Steam 英雄数据 (用于中文名)
+            if self.api_key:
+                try:
+                    url = f"{API_BASE}/IEconDOTA2_570/GetHeroes/v1/"
+                    params = {"key": self.api_key, "language": "zh"}
+                    async with session.get(url, params=params) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if 'result' in data and 'heroes' in data['result']:
+                                for h in data['result']['heroes']:
+                                    hid = h['id']
+                                    if hid in temp_heroes:
+                                        temp_heroes[hid]['name'] = h['localized_name']
+                                    else:
+                                        # 如果 OpenDota 没返回这个英雄 (不太可能)，则只有名字
+                                        name_suffix = h['name'].replace('npc_dota_hero_', '')
+                                        temp_heroes[hid] = {
+                                            'name': h['localized_name'],
+                                            'img': f"{VALVE_CDN_BASE}/apps/dota2/images/heroes/{name_suffix}_full.png"
+                                        }
+                except Exception as e:
+                    pass
+        
+        self.heroes_map = temp_heroes
+
     async def load_items(self):
-        """从 OpenDota 获取物品数据并建立映射"""
+        """从 OpenDota 和 Steam API 获取物品数据并建立映射"""
         if self.items_map:
             return
 
+        temp_items = {} # id -> {img, name}
+
         async with aiohttp.ClientSession() as session:
+            # 1. 获取 OpenDota 物品数据 (用于图片)
             try:
-                # OpenDota constants items 接口返回的是 dict: item_name -> data
-                # data 中包含 id, dname (显示名称)
                 async with session.get(f"{OPENDOTA_API_BASE}/constants/items") as resp:
                     if resp.status == 200:
                         items = await resp.json()
-                        # 建立 id -> dname 的映射
-                        self.items_map = {}
                         for key, data in items.items():
                             if data and 'id' in data:
-                                self.items_map[data['id']] = data.get('dname', key)
+                                temp_items[data['id']] = {
+                                    'name': data.get('dname', key), # 默认英文名
+                                    'img': f"{VALVE_CDN_BASE}{data['img']}"
+                                }
             except Exception as e:
                 pass
+
+            # 2. 获取 Steam 物品数据 (用于中文名)
+            if self.api_key:
+                try:
+                    url = f"{API_BASE}/IEconDOTA2_570/GetGameItems/v1/"
+                    params = {"key": self.api_key, "language": "zh"}
+                    async with session.get(url, params=params) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if 'result' in data and 'items' in data['result']:
+                                for item in data['result']['items']:
+                                    iid = item['id']
+                                    if iid in temp_items:
+                                        temp_items[iid]['name'] = item['localized_name']
+                except Exception as e:
+                    pass
+        
+        self.items_map = temp_items
+
+    async def enrich_player_names(self, details):
+        """补全玩家昵称"""
+        steam_ids = []
+        for p in details.get('players', []):
+            if p.get('account_id') and p.get('account_id') != 4294967295:
+                steam_ids.append(self.convert_to_64bit(p['account_id']))
+        
+        summaries = await self.get_player_summaries(steam_ids)
+        
+        for p in details.get('players', []):
+            if p.get('account_id'):
+                sid64 = str(self.convert_to_64bit(p['account_id']))
+                if sid64 in summaries:
+                    p['personaname'] = summaries[sid64].get('personaname')
+        return details
+
+    async def get_enriched_match_details(self, match_id):
+        """获取包含玩家昵称的比赛详情"""
+        async with aiohttp.ClientSession() as session:
+            details = await self.get_match_details(match_id, session)
+            if details:
+                return await self.enrich_player_names(details)
+            return None
+
+    async def get_recent_matches_details(self, limit=5):
+        """获取最近比赛的详细数据列表"""
+        if not self.steam_id_64:
+            return []
+            
+        matches_data = []
+        
+        async with aiohttp.ClientSession() as session:
+            # 尝试 1: Steam API
+            url = f"{API_BASE}/IDOTA2Match_570/GetMatchHistory/v1/"
+            params = {
+                "key": self.api_key,
+                "account_id": self.steam_id_64,
+                "matches_requested": limit
+            }
+            
+            matches = []
+            
+            try:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if 'result' in data and 'matches' in data['result']:
+                            matches = data['result']['matches']
+            except Exception:
+                pass
+
+            # Fallback to OpenDota
+            if not matches:
+                opendota_url = f"{OPENDOTA_API_BASE}/players/{self.steam_id_32}/matches"
+                opendota_params = {"limit": limit}
+                try:
+                    async with session.get(opendota_url, params=opendota_params) as resp:
+                        if resp.status == 200:
+                            matches = await resp.json()
+                except Exception as e:
+                    print(f"Error fetching matches from OpenDota: {e}")
+
+            if not matches:
+                return []
+
+            for m in matches:
+                match_id = m.get('match_id')
+                if not match_id:
+                    continue
+                
+                # 获取详情
+                details = await self.get_match_details(match_id, session)
+                if details:
+                    # 丰富玩家信息
+                    steam_ids = []
+                    for p in details.get('players', []):
+                        if p.get('account_id') and p.get('account_id') != 4294967295:
+                            steam_ids.append(self.convert_to_64bit(p['account_id']))
+                    
+                    summaries = await self.get_player_summaries(steam_ids)
+                    
+                    for p in details.get('players', []):
+                        if p.get('account_id'):
+                            sid64 = str(self.convert_to_64bit(p['account_id']))
+                            if sid64 in summaries:
+                                p['personaname'] = summaries[sid64].get('personaname')
+                    
+                    matches_data.append(details)
+                
+                # 避免触发速率限制
+                await asyncio.sleep(0.5)
+                
+        return matches_data
 
     async def get_recent_matches_str(self):
         """获取最近比赛并返回格式化字符串"""
@@ -239,7 +387,9 @@ class Dota2Monitor:
         for p in match_data.get('players', []):
             # 获取英雄名称
             hero_id = p.get('hero_id')
-            hero_name = self.heroes_map.get(hero_id, f"Unknown Hero ({hero_id})")
+            hero_data = self.heroes_map.get(hero_id, {})
+            hero_name = hero_data.get('name', f"Unknown Hero ({hero_id})")
+            hero_img = hero_data.get('img', "")
             
             # 基础数据
             kills = p.get('kills', 0)
@@ -260,21 +410,53 @@ class Dota2Monitor:
             tower_damage = p.get('tower_damage', 0)
             hd_td = f"{hero_damage // 1000}k/{tower_damage}" if hero_damage >= 1000 else f"{hero_damage}/{tower_damage}"
             
-            # 物品 (item_0 ~ item_5) + item_neutral
-            items = []
+            # 物品 (item_0 ~ item_5) + item_neutral + backpack (item_0 ~ item_2)
+            # 注意: Steam API 返回的 backpack 是 item_backpack_0 ~ item_backpack_2
+            # OpenDota API 返回的 backpack_0 ~ backpack_2
+            items_str_list = []
+            item_imgs = []
+            
+            # 主物品栏 0-5
             for i in range(6):
                 item_id = p.get(f'item_{i}')
                 if item_id:
-                    item_name = self.items_map.get(item_id, str(item_id))
-                    items.append(item_name)
+                    item_data = self.items_map.get(item_id, {})
+                    item_name = item_data.get('name', str(item_id))
+                    item_img = item_data.get('img', "")
+                    items_str_list.append(item_name)
+                    item_imgs.append(item_img)
+                else:
+                    item_imgs.append("") # 占位
             
+            # 背包物品 (尝试两种字段名)
+            backpack_imgs = []
+            for i in range(3):
+                item_id = p.get(f'backpack_{i}') or p.get(f'item_backpack_{i}')
+                if item_id:
+                    item_data = self.items_map.get(item_id, {})
+                    item_img = item_data.get('img', "")
+                    backpack_imgs.append(item_img)
+                else:
+                    backpack_imgs.append("")
+
             # 中立物品
             neutral_item_id = p.get('item_neutral')
             if neutral_item_id:
-                neutral_name = self.items_map.get(neutral_item_id, str(neutral_item_id))
-                items.append(f"({neutral_name})")
+                n_data = self.items_map.get(neutral_item_id, {})
+                n_name = n_data.get('name', str(neutral_item_id))
+                n_img = n_data.get('img', "")
+                items_str_list.append(f"({n_name})")
+                item_imgs.append(n_img)
+            else:
+                item_imgs.append("")
 
-            items_str = ", ".join(items) if items else "-"
+            items_str = ", ".join(items_str_list) if items_str_list else "-"
+
+            # Net Worth
+            gold = p.get('gold', 0)
+            gold_spent = p.get('gold_spent', 0)
+            net_worth = gold + gold_spent
+            nw_str = f"{net_worth / 1000:.1f}K" if net_worth >= 1000 else str(net_worth)
 
             # 获取玩家名称 (OpenDota fallback)
             personaname = p.get('personaname', 'Anonymous')
@@ -285,12 +467,24 @@ class Dota2Monitor:
                 'player_slot': p.get('player_slot'),
                 'account_id': p.get('account_id'), # 32位ID
                 'personaname': personaname, # 玩家昵称
+                'hero_id': hero_id,
                 'hero_name': hero_name,
+                'hero_img': hero_img,
+                'level': p.get('level', 0),
                 'kda': kda,
+                'kills': kills,
+                'deaths': deaths,
+                'assists': assists,
                 'lh_dn': lh_dn,
                 'gpm_xpm': gpm_xpm,
+                'gpm': gold_per_min,
+                'xpm': xp_per_min,
                 'hd_td': hd_td,
+                'damage': f"{hero_damage / 1000:.1f}K" if hero_damage >= 1000 else str(hero_damage),
                 'items': items_str,
+                'item_imgs': item_imgs,
+                'backpack_imgs': backpack_imgs,
+                'net_worth': nw_str,
                 'team': 'Radiant' if p.get('player_slot', 0) < 128 else 'Dire'
             }
             players_details.append(player_info)
