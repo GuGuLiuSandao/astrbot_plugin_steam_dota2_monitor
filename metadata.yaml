@@ -1,0 +1,9 @@
+name: steam_dota2_monitor
+desc: Dota2 比赛战绩查询插件，支持查询单场比赛详情和玩家最近比赛记录。
+author: Trae
+repo: https://github.com/TraeAI/astrbot_plugin_steam_dota2_monitor
+version: 0.1.0
+tags:
+  - dota2
+  - steam
+  - game

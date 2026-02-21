@@ -1,0 +1,7 @@
+{
+  "steam_api_key": {
+    "description": "Steam Web API Key",
+    "type": "string",
+    "hint": "请在 https://steamcommunity.com/dev/apikey 获取 "
+  }
+}
