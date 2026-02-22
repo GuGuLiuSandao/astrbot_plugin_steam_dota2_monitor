@@ -67,16 +67,38 @@ class Dota2Monitor:
         
         async with aiohttp.ClientSession() as session:
             # 1. 获取 OpenDota 英雄数据 (用于图片)
+            # 使用 constants/heroes 接口，因为 /heroes 接口可能缺少 img 字段
             try:
-                async with session.get(f"{OPENDOTA_API_BASE}/heroes") as resp:
+                async with session.get(f"{OPENDOTA_API_BASE}/constants/heroes") as resp:
                     if resp.status == 200:
                         heroes = await resp.json()
-                        for h in heroes:
-                            temp_heroes[h['id']] = {
-                                'name': h['localized_name'], # 默认英文名
-                                'img': f"{VALVE_CDN_BASE}{h['img']}"
-                            }
+                        for key, h in heroes.items():
+                            try:
+                                hero_id = h.get('id')
+                                if not hero_id:
+                                    continue
+                                
+                                # 优先使用 internal name 构造图片路径，以匹配本地资源
+                                # 本地资源文件名通常是 internal name 去掉 'npc_dota_hero_' 前缀
+                                internal_name = h.get('name', '')
+                                if internal_name and internal_name.startswith('npc_dota_hero_'):
+                                    name_suffix = internal_name.replace('npc_dota_hero_', '')
+                                    # 构造指向本地资源的 URL (renderer 会优先尝试本地匹配)
+                                    # 同时也作为有效的下载链接 (Valve CDN)
+                                    img_url = f"{VALVE_CDN_BASE}/apps/dota2/images/dota_react/heroes/{name_suffix}.png"
+                                else:
+                                    # Fallback to API provided img if name parsing fails
+                                    img_url = f"{VALVE_CDN_BASE}{h.get('img', '')}" if h.get('img') else ""
+
+                                temp_heroes[hero_id] = {
+                                    'name': h.get('localized_name', h.get('name', 'Unknown')),
+                                    'img': img_url
+                                }
+                            except Exception as inner_e:
+                                print(f"Skipping hero {key}: {inner_e}")
+                                continue
             except Exception as e:
+                print(f"Error loading heroes from OpenDota: {e}")
                 pass
 
             # 2. 获取 Steam 英雄数据 (用于中文名)
@@ -97,7 +119,8 @@ class Dota2Monitor:
                                         name_suffix = h['name'].replace('npc_dota_hero_', '')
                                         temp_heroes[hid] = {
                                             'name': h['localized_name'],
-                                            'img': f"{VALVE_CDN_BASE}/apps/dota2/images/heroes/{name_suffix}_full.png"
+                                            # 统一使用 dota_react 路径格式 (.png) 以匹配本地资源
+                                            'img': f"{VALVE_CDN_BASE}/apps/dota2/images/dota_react/heroes/{name_suffix}.png"
                                         }
                 except Exception as e:
                     pass
@@ -364,6 +387,35 @@ class Dota2Monitor:
             
         return None
 
+    def evaluate_performance(self, player_data):
+        """基于 KDA 评价表现"""
+        try:
+            k = player_data.get('kills', 0)
+            d = player_data.get('deaths', 0)
+            a = player_data.get('assists', 0)
+            
+            # KDA Calculation
+            kda_val = (k + a) / (d + 1) if d > 0 else (k + a)
+            
+            if kda_val > 15:
+                return "如同天上降魔主，真是人间太岁神！"
+            elif kda_val > 10:
+                return "杀戮机器，无人能挡！"
+            elif kda_val > 7:
+                return "Carry 全场，大腿级表现！"
+            elif kda_val > 5:
+                return "发挥出色，坚实可靠。"
+            elif kda_val > 3:
+                return "中规中矩，平稳发挥。"
+            elif kda_val > 1.5:
+                return "略显挣扎，需调整状态。"
+            elif kda_val > 0.5:
+                return "究极尽力局？还是在梦游？"
+            else:
+                return "这是在送？建议严查！"
+        except:
+            return "表现未知"
+
     def parse_match_data(self, match_data):
         """解析单场比赛数据"""
         # 1. 基础信息
@@ -501,6 +553,7 @@ class Dota2Monitor:
 
         return {
             'match_id': match_id,
+            'start_time': start_time,
             'time_str': time_str,
             'duration_str': duration_str,
             'radiant_win': radiant_win,

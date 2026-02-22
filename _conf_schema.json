@@ -3,5 +3,30 @@
     "description": "Steam Web API Key",
     "type": "string",
     "hint": "请在 https://steamcommunity.com/dev/apikey 获取 "
-  }
+  },
+  "alias_map": {
+    "description": "Steam ID 别名映射配置",
+    "type": "list",
+    "item_type": "string",
+    "hint": "格式: SteamID:别名1,别名2 (例如 76561198000000001:ana,god)"
+  },
+  "subscriptions": {
+    "description": "订阅列表 (Steam ID)",
+    "type": "list",
+    "item_type": "string",
+    "hint": "根据 Cron 表达式检查最近比赛，有新比赛则推送"
+  },
+  "cron_expression": {
+    "description": "推送检查时间 (Cron表达式)",
+    "type": "string",
+    "hint": "例如: '0,14,16,18,20,22 * * *' (分 时 日 月 周)，默认秒为0，时区UTC+8",
+    "default": "0 0,14,16,18,20,22 * * *"
+  },
+  "groups": { 
+     "description": "需要推送内容的群组唯一标识符列表", 
+     "type": "list", 
+     "hint": "填写需要接收推送的群组唯一标识符，如: 机器人名称:GroupMessage:你的群号", 
+     "obvious_hint": true, 
+     "default": ["机器人名称:GroupMessage:你的群号"] 
+   }
 }
