@@ -201,10 +201,10 @@ class SteamDota2Monitor(Star):
                 
                 last_pushed_id = self.last_pushed_matches.get(real_steam_id)
                 
-                # 如果是新比赛 (ID不同) 且 发生时间在近期 (比如24小时内)
+                # 如果是新比赛 (ID不同) 且 发生时间在近期 (比如3小时内)
                 # 注意: last_pushed_matches 使用 real_steam_id 作为 key
                 if match_id != last_pushed_id:
-                    if (current_ts - start_time < 86400):
+                    if (current_ts - start_time < 10800):
                         # 更新该用户的最后推送ID
                         self.last_pushed_matches[real_steam_id] = match_id
                         
@@ -218,7 +218,7 @@ class SteamDota2Monitor(Star):
                     else:
                         # 比赛太久远，不推送，但也更新 last_pushed_id 以免下次重复检查
                         self.last_pushed_matches[real_steam_id] = match_id
-                        logger.debug(f"[Dota2Monitor] Match {match_id} for {real_steam_id} is too old (>24h), skipping push.")
+                        logger.debug(f"[Dota2Monitor] Match {match_id} for {real_steam_id} is too old (>3h), skipping push.")
                 
             except Exception as e:
                 logger.error(f"[Dota2Monitor] Error checking subscription for {steam_id}: {e}")
